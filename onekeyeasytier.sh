@@ -548,23 +548,46 @@ EOF
 
 deploy_new_network() { 
 	check_installed || return 1
-	read -p "请输入网络名称: " network_name
-	read -p "请输入网络密钥: " network_secret
-	read -p "请输入此虚拟IP (回车则启用DHCP): " virtual_ip
+	read -p "请输入网络名称 (留空保留现有): " network_name
+	read -p "请输入网络密钥 (留空保留现有): " network_secret
+	read -p "请输入此虚拟IP (回车则启用DHCP，留空保留现有): " virtual_ip
 	
-	create_default_config || return 1
-	
-	set_toml_value "network_name" "\"$network_name\"" "$CONFIG_FILE"
-	set_toml_value "network_secret" "\"$network_secret\"" "$CONFIG_FILE"
-	
-	if [ -z "$virtual_ip" ]; then
-		echo -e "${YELLOW}未输入IP，将启用 DHCP 自动获取地址。${NC}"
-		set_toml_value "dhcp" "true" "$CONFIG_FILE"
-		set_toml_value "ipv4" "\"\"" "$CONFIG_FILE"
+	# 如果名称和密码都为空，保留现有配置
+	if [ -z "$network_name" ] && [ -z "$network_secret" ] && [ -z "$virtual_ip" ]; then
+		if [ ! -f "$CONFIG_FILE" ]; then
+			echo -e "${YELLOW}配置文件不存在，正在创建默认配置...${NC}"
+			create_default_config || return 1
+		else
+			echo -e "${YELLOW}网络名称、密钥和IP都未输入，保留现有配置。${NC}"
+		fi
 	else
-		echo -e "${GREEN}已设置静态IP: ${virtual_ip}${NC}"
-		set_toml_value "dhcp" "false" "$CONFIG_FILE"
-		set_toml_value "ipv4" "\"$virtual_ip\"" "$CONFIG_FILE"
+		# 如果配置文件不存在，创建默认配置
+		if [ ! -f "$CONFIG_FILE" ]; then
+			create_default_config || return 1
+		fi
+		
+		# 更新网络名称（如果输入了）
+		if [ -n "$network_name" ]; then
+			set_toml_value "network_name" "\"$network_name\"" "$CONFIG_FILE"
+		fi
+		
+		# 更新网络密钥（如果输入了）
+		if [ -n "$network_secret" ]; then
+			set_toml_value "network_secret" "\"$network_secret\"" "$CONFIG_FILE"
+		fi
+		
+		# 更新虚拟IP（如果输入了）
+		if [ -n "$virtual_ip" ]; then
+			if [ "$virtual_ip" = "dhcp" ] || [ "$virtual_ip" = "DHCP" ]; then
+				echo -e "${YELLOW}启用 DHCP 自动获取地址。${NC}"
+				set_toml_value "dhcp" "true" "$CONFIG_FILE"
+				set_toml_value "ipv4" "\"\"" "$CONFIG_FILE"
+			else
+				echo -e "${GREEN}已设置静态IP: ${virtual_ip}${NC}"
+				set_toml_value "dhcp" "false" "$CONFIG_FILE"
+				set_toml_value "ipv4" "\"$virtual_ip\"" "$CONFIG_FILE"
+			fi
+		fi
 	fi
 
 	create_service_file
@@ -748,8 +771,17 @@ advanced_config_menu() {
 		14) echo "子网代理:";
 		    grep -A1 "\[\[proxy_network\]\]" "$CONFIG_FILE" 2>/dev/null | grep cidr || echo "(无)"
 		    read -p "[a]添加子网 [d]清空所有 [c]取消: " pact
-		    if [ "$pact" = "a" ]; then read -p "CIDR (如 192.168.1.0/24): " val; add_proxy_network "$val" "$CONFIG_FILE";
-		    elif [ "$pact" = "d" ]; then sed -i.bak "/\[\[proxy_network\]\]/d;/cidr\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已清空所有子网代理。${NC}"; fi ;;
+		    if [ "$pact" = "a" ]; then 
+		        read -p "CIDR (如 192.168.1.0/24): " val; 
+		        add_proxy_network "$val" "$CONFIG_FILE";
+		        echo -e "${YELLOW}正在重启服务以应用子网代理配置...${NC}";
+		        restart_service;
+		    elif [ "$pact" = "d" ]; then 
+		        sed -i.bak "/\[\[proxy_network\]\]/d;/cidr\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; 
+		        echo -e "${YELLOW}已清空所有子网代理。${NC}";
+		        echo -e "${YELLOW}正在重启服务以应用配置...${NC}";
+		        restart_service;
+		    fi ;;
 		15) echo "VPN Portal (WireGuard 门户):"
 		    grep "^vpn_portal" "$CONFIG_FILE" 2>/dev/null || echo "(未设置)"
 		    read -p "VPN Portal 配置 (如 wg://0.0.0.0:11013/10.14.14.0/24，留空则删除): " val
