@@ -281,15 +281,15 @@ check_firewalld_port() {
 # 检查端口是否已在防火墙中放行（iptables）
 check_iptables_port() {
 	local port="$1" protocol="$2"
-	# 根据当前用户权限选择执行方式
+	# 使用 iptables -C 来检查规则是否存在（更可靠）
 	if [ "$(id -u)" -eq 0 ]; then
 		# root 用户直接执行
-		if iptables -L INPUT -n 2>/dev/null | grep -E -- "-p ${protocol}\b.*--dport\s+${port}\b"; then
+		if iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null; then
 			return 0
 		fi
 	else
 		# 非 root 用户使用 sudo
-		if command -v sudo &>/dev/null && sudo iptables -L INPUT -n 2>/dev/null | grep -E -- "-p ${protocol}\b.*--dport\s+${port}\b"; then
+		if command -v sudo &>/dev/null && sudo iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null; then
 			return 0
 		fi
 	fi
