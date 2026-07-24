@@ -1744,19 +1744,40 @@ public_nodes_menu() {
 
 		case $sub in
 			1) 
-				echo -e "${BLUE}--- 公共节点列表 ---${NC}"
+				echo "--- 公共节点列表 ---"
 				echo ""
-				echo "官方节点:"
-				for node in "${BUILTIN_PUBLIC_NODES[@]}"; do
-					echo "  [可用] $node"
-				done
+				echo "正在从网络获取节点列表..."
 				echo ""
-				echo "社区节点:"
-				for node in "${BUILTIN_COMMUNITY_NODES[@]}"; do
-					echo "  [可用] $node"
-				done
-				echo ""
-				echo -e "${YELLOW}提示: 还可以从官方 API 获取更多节点（选项2测速时自动获取）${NC}"
+				local all_nodes; all_nodes=$(get_all_public_nodes 2>/dev/null)
+				if [ -z "$all_nodes" ]; then
+					echo "获取节点列表失败，显示内置节点:"
+					echo ""
+					echo "官方节点:"
+					for node in "${BUILTIN_PUBLIC_NODES[@]}"; do
+						echo "  [可用] $node"
+					done
+					echo ""
+					echo "社区节点:"
+					for node in "${BUILTIN_COMMUNITY_NODES[@]}"; do
+						echo "  [可用] $node"
+					done
+				else
+					local node_count; node_count=$(echo "$all_nodes" | wc -l)
+					echo "共获取到 ${node_count} 个公共节点:"
+					echo ""
+					local idx=0
+					while IFS='|' read -r source uri extra1 extra2; do
+						idx=$((idx + 1))
+						if [ "$source" = "官方" ]; then
+							printf "  %3d. [官方] %s\n" "$idx" "$uri"
+						elif [ "$source" = "社区" ]; then
+							printf "  %3d. [社区] %s\n" "$idx" "$uri"
+						elif [ "$source" = "API" ]; then
+							local status_str=""; [ -n "$extra2" ] && status_str=" ($extra2)"
+							printf "  %3d. [API]  %s  %s%s\n" "$idx" "$uri" "$extra1" "$status_str"
+						fi
+					done <<< "$all_nodes"
+				fi
 				;;
 			2) test_all_nodes ;;
 			3) show_latency_results ;;
