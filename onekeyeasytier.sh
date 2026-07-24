@@ -1183,6 +1183,9 @@ EOF
 deploy_new_network() { 
 	check_installed || return 1
 	
+	# 自动从运行实例同步配置（同步 Web 修改的配置）
+	sync_config_from_running
+	
 	# 显示现有网络配置（如果存在）
 	if [ -f "$CONFIG_FILE" ]; then
 		echo -e "${BLUE}--- 当前网络配置 ---${NC}"
@@ -1288,6 +1291,175 @@ join_existing_network() {
 	sleep 2; status_service
 }
 
+# --- 从运行实例同步配置到 TOML 文件 ---
+sync_config_from_running() {
+	check_installed || return 1
+	
+	# 静默检查服务是否运行
+	if ! status_service 2>/dev/null | grep -q "active\|running"; then
+		return 1
+	fi
+	
+	local cli="${INSTALL_DIR}/${CLI_BINARY_NAME}"
+	
+	# 获取节点信息
+	local node_info; node_info=$("$cli" node 2>/dev/null)
+	if [ -z "$node_info" ]; then
+		return 1
+	fi
+	
+	# 确保配置文件存在
+	if [ ! -f "$CONFIG_FILE" ]; then
+		create_default_config
+	fi
+	
+	# 解析并同步所有可获取的配置项
+	# network_name
+	local running_network_name; running_network_name=$(echo "$node_info" | grep -iE "^\s*(network_name|NetworkName)" | awk -F': ' '{print $2}' | tr -d ' \r')
+	if [ -n "$running_network_name" ]; then
+		set_toml_value "network_name" "\"$running_network_name\"" "$CONFIG_FILE"
+	fi
+	
+	# virtual_ipv4
+	local running_ipv4; running_ipv4=$(echo "$node_info" | grep -iE "^\s*(virtual_ipv4|VirtualIPv4|ipv4)" | head -1 | awk -F': ' '{print $2}' | awk '{print $1}' | tr -d ' \r')
+	if [ -n "$running_ipv4" ] && [ "$running_ipv4" != "NONE" ] && [ "$running_ipv4" != "None" ]; then
+		set_toml_value "ipv4" "\"$running_ipv4\"" "$CONFIG_FILE"
+		set_toml_value "dhcp" "false" "$CONFIG_FILE"
+	fi
+	
+	# hostname
+	local running_hostname; running_hostname=$(echo "$node_info" | grep -iE "^\s*(hostname|Hostname)" | awk -F': ' '{print $2}' | tr -d ' \r')
+	if [ -n "$running_hostname" ]; then
+		add_toml_entry "hostname" "\"$running_hostname\"" "$CONFIG_FILE"
+	fi
+	
+	# instance_name
+	local running_instance; running_instance=$(echo "$node_info" | grep -iE "^\s*(instance_name|InstanceName)" | awk -F': ' '{print $2}' | tr -d ' \r')
+	if [ -n "$running_instance" ]; then
+		add_toml_entry "instance_name" "\"$running_instance\"" "$CONFIG_FILE"
+	fi
+	
+	# 尝试从 Web API 获取更完整的配置
+	local web_api_url="http://127.0.0.1:${DEFAULT_API_SERVER_PORT}"
+	if command -v curl &>/dev/null; then
+		# 尝试获取网络配置列表
+		local api_response; api_response=$(curl -sL --connect-timeout 2 "${web_api_url}/api/v1/network" 2>/dev/null)
+		if [ -n "$api_response" ] && echo "$api_response" | grep -q '"'; then
+			# 如果安装了 jq，解析 JSON 配置
+			if command -v jq &>/dev/null; then
+				# network_secret
+				local api_secret; api_secret=$(echo "$api_response" | jq -r '.[0].network_secret // .network_secret // empty' 2>/dev/null)
+				if [ -n "$api_secret" ] && [ "$api_secret" != "null" ]; then
+					set_toml_value "network_secret" "\"$api_secret\"" "$CONFIG_FILE"
+				fi
+				
+				# default_protocol
+				local api_protocol; api_protocol=$(echo "$api_response" | jq -r '.[0].default_protocol // .default_protocol // empty' 2>/dev/null)
+				if [ -n "$api_protocol" ] && [ "$api_protocol" != "null" ]; then
+					set_toml_value "default_protocol" "\"$api_protocol\"" "$CONFIG_FILE"
+				fi
+				
+				# mtu
+				local api_mtu; api_mtu=$(echo "$api_response" | jq -r '.[0].mtu // .mtu // empty' 2>/dev/null)
+				if [ -n "$api_mtu" ] && [ "$api_mtu" != "null" ]; then
+					set_toml_value "mtu" "$api_mtu" "$CONFIG_FILE"
+				fi
+				
+				# latency_first
+				local api_latency; api_latency=$(echo "$api_response" | jq -r '.[0].latency_first // .latency_first // empty' 2>/dev/null)
+				if [ -n "$api_latency" ] && [ "$api_latency" != "null" ]; then
+					set_toml_value "latency_first" "$api_latency" "$CONFIG_FILE"
+				fi
+				
+				# enable_encryption
+				local api_enc; api_enc=$(echo "$api_response" | jq -r '.[0].enable_encryption // .enable_encryption // empty' 2>/dev/null)
+				if [ -n "$api_enc" ] && [ "$api_enc" != "null" ]; then
+					set_toml_value "enable_encryption" "$api_enc" "$CONFIG_FILE"
+				fi
+				
+				# enable_ipv6
+				local api_ipv6; api_ipv6=$(echo "$api_response" | jq -r '.[0].enable_ipv6 // .enable_ipv6 // empty' 2>/dev/null)
+				if [ -n "$api_ipv6" ] && [ "$api_ipv6" != "null" ]; then
+					set_toml_value "enable_ipv6" "$api_ipv6" "$CONFIG_FILE"
+				fi
+				
+				# no_tun
+				local api_notun; api_notun=$(echo "$api_response" | jq -r '.[0].no_tun // .no_tun // empty' 2>/dev/null)
+				if [ -n "$api_notun" ] && [ "$api_notun" != "null" ]; then
+					set_toml_value "no_tun" "$api_notun" "$CONFIG_FILE"
+				fi
+				
+				# use_smoltcp
+				local api_smoltcp; api_smoltcp=$(echo "$api_response" | jq -r '.[0].use_smoltcp // .use_smoltcp // empty' 2>/dev/null)
+				if [ -n "$api_smoltcp" ] && [ "$api_smoltcp" != "null" ]; then
+					set_toml_value "use_smoltcp" "$api_smoltcp" "$CONFIG_FILE"
+				fi
+				
+				# enableKcp_Proxy
+				local api_kcp; api_kcp=$(echo "$api_response" | jq -r '.[0].enable_kcp_proxy // .enableKcp_Proxy // empty' 2>/dev/null)
+				if [ -n "$api_kcp" ] && [ "$api_kcp" != "null" ]; then
+					set_toml_value "enableKcp_Proxy" "$api_kcp" "$CONFIG_FILE"
+				fi
+				
+				# multi_thread
+				local api_mt; api_mt=$(echo "$api_response" | jq -r '.[0].multi_thread // .multi_thread // empty' 2>/dev/null)
+				if [ -n "$api_mt" ] && [ "$api_mt" != "null" ]; then
+					add_toml_entry "multi_thread" "$api_mt" "$CONFIG_FILE"
+				fi
+				
+				# disable_p2p
+				local api_p2p; api_p2p=$(echo "$api_response" | jq -r '.[0].disable_p2p // .disable_p2p // empty' 2>/dev/null)
+				if [ -n "$api_p2p" ] && [ "$api_p2p" != "null" ]; then
+					set_toml_value "disable_p2p" "$api_p2p" "$CONFIG_FILE"
+				fi
+				
+				# disable_udp_hole_punching
+				local api_udp; api_udp=$(echo "$api_response" | jq -r '.[0].disable_udp_hole_punching // .disable_udp_hole_punching // empty' 2>/dev/null)
+				if [ -n "$api_udp" ] && [ "$api_udp" != "null" ]; then
+					set_toml_value "disable_udp_hole_punching" "$api_udp" "$CONFIG_FILE"
+				fi
+				
+				# private_mode
+				local api_pm; api_pm=$(echo "$api_response" | jq -r '.[0].private_mode // .private_mode // empty' 2>/dev/null)
+				if [ -n "$api_pm" ] && [ "$api_pm" != "null" ]; then
+					set_toml_value "private_mode" "$api_pm" "$CONFIG_FILE"
+				fi
+				
+				# relay_all_peer_rpc
+				local api_relay; api_relay=$(echo "$api_response" | jq -r '.[0].relay_all_peer_rpc // .relay_all_peer_rpc // empty' 2>/dev/null)
+				if [ -n "$api_relay" ] && [ "$api_relay" != "null" ]; then
+					set_toml_value "relay_all_peer_rpc" "$api_relay" "$CONFIG_FILE"
+				fi
+				
+				# 同步 peers 列表
+				local api_peers; api_peers=$(echo "$api_response" | jq -r '.[0].peers // .peers // empty' 2>/dev/null)
+				if [ -n "$api_peers" ] && [ "$api_peers" != "null" ] && [ "$api_peers" != "[]" ]; then
+					# 先清空旧的 peer 配置
+					sed -i.bak "/^\[\[peer\]\]/d;/^uri\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak" 2>/dev/null
+					# 逐个添加 peer
+					local peer_count; peer_count=$(echo "$api_peers" | jq 'length' 2>/dev/null)
+					if [ "$peer_count" -gt 0 ] 2>/dev/null; then
+						for i in $(seq 0 $((peer_count - 1))); do
+							local peer_uri; peer_uri=$(echo "$api_peers" | jq -r ".[$i].uri // empty" 2>/dev/null)
+							if [ -n "$peer_uri" ]; then
+								add_peer_uri "$peer_uri" "$CONFIG_FILE"
+							fi
+						done
+					fi
+				fi
+				
+				# 同步 listeners
+				local api_listeners; api_listeners=$(echo "$api_response" | jq -r '.[0].listeners // .listeners // empty' 2>/dev/null)
+				if [ -n "$api_listeners" ] && [ "$api_listeners" != "null" ] && [ "$api_listeners" != "[]" ]; then
+					set_toml_value "listeners" "$api_listeners" "$CONFIG_FILE"
+				fi
+			fi
+		fi
+	fi
+	
+	return 0
+}
+
 # --- 高级网络配置菜单 ---
 advanced_config_menu() {
 	check_installed || return 1
@@ -1295,6 +1467,9 @@ advanced_config_menu() {
 		echo -e "${YELLOW}配置文件不存在，正在创建默认配置...${NC}"
 		create_default_config || return 1
 	fi
+
+	# 自动从运行实例同步配置（静默模式，同步 Web 修改的配置）
+	sync_config_from_running
 
 	while true; do
 		clear
