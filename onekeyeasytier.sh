@@ -2113,11 +2113,11 @@ main() {
 		echo -e " ${BLUE}--- 运维工具 ---${NC}"
 		echo "  9. CLI 工具箱 (peer/route/vpn-portal/node)"
 		echo " 10. 查看组网节点"
-		echo " 13. 公共节点管理（测速+一键最快）"
+		echo " 11. 公共节点管理（测速+一键最快）"
 		echo " 12. 防火墙端口管理"
 		echo ""
 		echo -e " ${RED}--- 系统 ---${NC}"
-		echo " 11. 卸载 EasyTier"
+		echo " 13. 卸载 EasyTier"
 		echo "  0. 退出脚本"
 		echo "======================================================="
 		read -p "请输入选项 [0-13]: " choice
@@ -2135,9 +2135,9 @@ main() {
 			8) manage_web_service ;;
 			9) cli_toolbox_menu ;;
 			10) if check_installed; then ${INSTALL_DIR}/${CLI_BINARY_NAME} peer; fi ;;
-			13) public_nodes_menu ;;
+			11) public_nodes_menu ;;
 			12) firewall_menu ;;
-			11) uninstall_easytier ;;
+			13) uninstall_easytier ;;
 			0) exit 0 ;;
 			*) echo -e "${RED}无效输入${NC}" ;;
 		esac
