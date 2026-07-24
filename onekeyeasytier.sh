@@ -281,12 +281,19 @@ check_firewalld_port() {
 # 检查端口是否已在防火墙中放行（iptables）
 check_iptables_port() {
 	local port="$1" protocol="$2"
-	# 使用 sudo 执行 iptables，并改进匹配模式
-	if sudo iptables -L INPUT -n 2>/dev/null | grep -E -- "-p ${protocol}\b.*--dport\s+${port}\b"; then
-		return 0
+	# 根据当前用户权限选择执行方式
+	if [ "$(id -u)" -eq 0 ]; then
+		# root 用户直接执行
+		if iptables -L INPUT -n 2>/dev/null | grep -E -- "-p ${protocol}\b.*--dport\s+${port}\b"; then
+			return 0
+		fi
 	else
-		return 1
+		# 非 root 用户使用 sudo
+		if command -v sudo &>/dev/null && sudo iptables -L INPUT -n 2>/dev/null | grep -E -- "-p ${protocol}\b.*--dport\s+${port}\b"; then
+			return 0
+		fi
 	fi
+	return 1
 }
 
 # 检查端口是否已在防火墙中放行（通用入口）
@@ -345,7 +352,21 @@ open_iptables_port() {
 		echo "端口 ${port}/${protocol} 已在 iptables 中放行"
 		return 0
 	fi
-	sudo iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
+	
+	# 根据当前用户权限选择执行方式
+	if [ "$(id -u)" -eq 0 ]; then
+		# root 用户直接执行
+		iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
+	else
+		# 非 root 用户使用 sudo
+		if command -v sudo &>/dev/null; then
+			sudo iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
+		else
+			echo "错误: 需要 root 权限或安装 sudo"
+			return 1
+		fi
+	fi
+	
 	if check_iptables_port "$port" "$protocol"; then
 		echo "已在 iptables 中放行端口 ${port}/${protocol}"
 		return 0
@@ -411,7 +432,21 @@ close_iptables_port() {
 		echo "端口 ${port}/${protocol} 未在 iptables 中放行"
 		return 0
 	fi
-	sudo iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
+	
+	# 根据当前用户权限选择执行方式
+	if [ "$(id -u)" -eq 0 ]; then
+		# root 用户直接执行
+		iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
+	else
+		# 非 root 用户使用 sudo
+		if command -v sudo &>/dev/null; then
+			sudo iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
+		else
+			echo "错误: 需要 root 权限或安装 sudo"
+			return 1
+		fi
+	fi
+	
 	if ! check_iptables_port "$port" "$protocol"; then
 		echo "已在 iptables 中关闭端口 ${port}/${protocol}"
 		return 0
