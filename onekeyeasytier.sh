@@ -48,6 +48,39 @@ DEFAULT_API_SERVER_PORT="11211"
 DEFAULT_CONFIG_SERVER_PORT="22020"
 DEFAULT_CONFIG_SERVER_PROTOCOL="udp"
 
+# --- 防火墙端口定义 ---
+# EasyTier Core 默认端口
+FIREWALL_PORTS_CORE_TCP="11010 11011 11012"
+FIREWALL_PORTS_CORE_UDP="11010 11011 11012"
+# RPC 管理端口
+FIREWALL_PORT_RPC="15888"
+# Web 控制台端口
+FIREWALL_PORT_WEB="11211"
+# 配置下发端口
+FIREWALL_PORT_CONFIG_SERVER="22020"
+
+# --- 公共节点配置 ---
+# 官方公共节点状态 API
+EASYTIER_NODES_API="https://uptime.easytier.cn/api/nodes?page=1&per_page=200"
+# 内置官方公共中继节点
+BUILTIN_PUBLIC_NODES=(
+	"tcp://public.easytier.top:11010"
+	"tcp://public.easytier.cn:11010"
+)
+# 内置社区公共节点
+BUILTIN_COMMUNITY_NODES=(
+	"tcp://sh.vomiku.com:7910"
+	"udp://sh.vomiku.com:7910"
+	"ws://sh.vomiku.com:7911"
+	"wss://sh.vomiku.com:7912"
+	"tcp://us01.225284.xyz:11010"
+	"udp://us01.225284.xyz:11010"
+)
+# 节点测速超时时间（秒）
+NODE_PING_TIMEOUT=3
+# 节点测速缓存文件
+NODES_CACHE_FILE="${CONFIG_DIR}/.nodes_cache"
+
 # 原始下载地址
 GITHUB_API_URL="https://api.github.com/repos/EasyTier/EasyTier/releases/latest"
 
@@ -201,6 +234,568 @@ add_vpn_portal() {
 	sed -i.bak "/^vpn_portal\s*=/d" "$file" && rm "${file}.bak"
 	echo "vpn_portal = \"${portal}\"" >> "$file"
 	echo -e "${GREEN}已设置 VPN Portal: ${portal}${NC}"
+}
+
+
+# --- 防火墙管理功能 ---
+
+# 检测系统使用的防火墙类型
+detect_firewall() {
+	if [[ "$OS_TYPE" == "macos" ]]; then
+		echo "pfctl"
+	elif [[ "$OS_TYPE" == "alpine" ]]; then
+		echo "iptables"
+	else
+		if command -v ufw &>/dev/null && ufw status &>/dev/null; then
+			echo "ufw"
+		elif command -v firewall-cmd &>/dev/null && systemctl is-active firewalld &>/dev/null; then
+			echo "firewalld"
+		elif command -v iptables &>/dev/null; then
+			echo "iptables"
+		else
+			echo "none"
+		fi
+	fi
+}
+
+# 检查端口是否已在防火墙中放行（ufw）
+check_ufw_port() {
+	local port="$1" protocol="$2"
+	if ufw status | grep -q "${port}/${protocol}"; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# 检查端口是否已在防火墙中放行（firewalld）
+check_firewalld_port() {
+	local port="$1" protocol="$2"
+	if firewall-cmd --list-ports 2>/dev/null | grep -q "${port}/${protocol}"; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# 检查端口是否已在防火墙中放行（iptables）
+check_iptables_port() {
+	local port="$1" protocol="$2"
+	if iptables -L INPUT -n 2>/dev/null | grep -q "dpt:${port}.*${protocol}"; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# 检查端口是否已在防火墙中放行（通用入口）
+check_firewall_port() {
+	local port="$1" protocol="$2"
+	local fw_type; fw_type=$(detect_firewall)
+
+	case "$fw_type" in
+		ufw) check_ufw_port "$port" "$protocol"; return $? ;;
+		firewalld) check_firewalld_port "$port" "$protocol"; return $? ;;
+		iptables) check_iptables_port "$port" "$protocol"; return $? ;;
+		pfctl) echo -e "${YELLOW}macOS pfctl 检查暂未实现${NC}"; return 1 ;;
+		none) echo -e "${YELLOW}未检测到防火墙${NC}"; return 0 ;;
+	esac
+}
+
+# 开放端口（ufw）
+open_ufw_port() {
+	local port="$1" protocol="$2"
+	if check_ufw_port "$port" "$protocol"; then
+		echo -e "${GREEN}端口 ${port}/${protocol} 已在 ufw 中放行${NC}"
+		return 0
+	fi
+	ufw allow "${port}/${protocol}" &>/dev/null
+	if check_ufw_port "$port" "$protocol"; then
+		echo -e "${GREEN}已在 ufw 中放行端口 ${port}/${protocol}${NC}"
+		return 0
+	else
+		echo -e "${RED}ufw 放行端口 ${port}/${protocol} 失败${NC}"
+		return 1
+	fi
+}
+
+# 开放端口（firewalld）
+open_firewalld_port() {
+	local port="$1" protocol="$2"
+	if check_firewalld_port "$port" "$protocol"; then
+		echo -e "${GREEN}端口 ${port}/${protocol} 已在 firewalld 中放行${NC}"
+		return 0
+	fi
+	firewall-cmd --permanent --add-port="${port}/${protocol}" &>/dev/null
+	firewall-cmd --reload &>/dev/null
+	if check_firewalld_port "$port" "$protocol"; then
+		echo -e "${GREEN}已在 firewalld 中放行端口 ${port}/${protocol}${NC}"
+		return 0
+	else
+		echo -e "${RED}firewalld 放行端口 ${port}/${protocol} 失败${NC}"
+		return 1
+	fi
+}
+
+# 开放端口（iptables）
+open_iptables_port() {
+	local port="$1" protocol="$2"
+	if check_iptables_port "$port" "$protocol"; then
+		echo -e "${GREEN}端口 ${port}/${protocol} 已在 iptables 中放行${NC}"
+		return 0
+	fi
+	iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT &>/dev/null
+	if check_iptables_port "$port" "$protocol"; then
+		echo -e "${GREEN}已在 iptables 中放行端口 ${port}/${protocol}${NC}"
+		return 0
+	else
+		echo -e "${RED}iptables 放行端口 ${port}/${protocol} 失败${NC}"
+		return 1
+	fi
+}
+
+# 开放端口（通用入口）
+open_firewall_port() {
+	local port="$1" protocol="$2"
+	local fw_type; fw_type=$(detect_firewall)
+
+	case "$fw_type" in
+		ufw) open_ufw_port "$port" "$protocol"; return $? ;;
+		firewalld) open_firewalld_port "$port" "$protocol"; return $? ;;
+		iptables) open_iptables_port "$port" "$protocol"; return $? ;;
+		pfctl) echo -e "${YELLOW}macOS pfctl 配置暂未实现${NC}"; return 1 ;;
+		none) echo -e "${YELLOW}未检测到防火墙，无需配置${NC}"; return 0 ;;
+	esac
+}
+
+# 关闭端口（ufw）
+close_ufw_port() {
+	local port="$1" protocol="$2"
+	if ! check_ufw_port "$port" "$protocol"; then
+		echo -e "${YELLOW}端口 ${port}/${protocol} 未在 ufw 中放行${NC}"
+		return 0
+	fi
+	ufw delete allow "${port}/${protocol}" &>/dev/null
+	if ! check_ufw_port "$port" "$protocol"; then
+		echo -e "${GREEN}已在 ufw 中关闭端口 ${port}/${protocol}${NC}"
+		return 0
+	else
+		echo -e "${RED}ufw 关闭端口 ${port}/${protocol} 失败${NC}"
+		return 1
+	fi
+}
+
+# 关闭端口（firewalld）
+close_firewalld_port() {
+	local port="$1" protocol="$2"
+	if ! check_firewalld_port "$port" "$protocol"; then
+		echo -e "${YELLOW}端口 ${port}/${protocol} 未在 firewalld 中放行${NC}"
+		return 0
+	fi
+	firewall-cmd --permanent --remove-port="${port}/${protocol}" &>/dev/null
+	firewall-cmd --reload &>/dev/null
+	if ! check_firewalld_port "$port" "$protocol"; then
+		echo -e "${GREEN}已在 firewalld 中关闭端口 ${port}/${protocol}${NC}"
+		return 0
+	else
+		echo -e "${RED}firewalld 关闭端口 ${port}/${protocol} 失败${NC}"
+		return 1
+	fi
+}
+
+# 关闭端口（iptables）
+close_iptables_port() {
+	local port="$1" protocol="$2"
+	if ! check_iptables_port "$port" "$protocol"; then
+		echo -e "${YELLOW}端口 ${port}/${protocol} 未在 iptables 中放行${NC}"
+		return 0
+	fi
+	iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT &>/dev/null
+	if ! check_iptables_port "$port" "$protocol"; then
+		echo -e "${GREEN}已在 iptables 中关闭端口 ${port}/${protocol}${NC}"
+		return 0
+	else
+		echo -e "${RED}iptables 关闭端口 ${port}/${protocol} 失败${NC}"
+		return 1
+	fi
+}
+
+# 关闭端口（通用入口）
+close_firewall_port() {
+	local port="$1" protocol="$2"
+	local fw_type; fw_type=$(detect_firewall)
+
+	case "$fw_type" in
+		ufw) close_ufw_port "$port" "$protocol"; return $? ;;
+		firewalld) close_firewalld_port "$port" "$protocol"; return $? ;;
+		iptables) close_iptables_port "$port" "$protocol"; return $? ;;
+		pfctl) echo -e "${YELLOW}macOS pfctl 配置暂未实现${NC}"; return 1 ;;
+		none) echo -e "${YELLOW}未检测到防火墙，无需配置${NC}"; return 0 ;;
+	esac
+}
+
+# 一键放行 EasyTier 所有必要端口
+open_all_easytier_ports() {
+	echo -e "${BLUE}--- 正在放行 EasyTier 所需端口 ---${NC}"
+	echo "检测到防火墙类型: $(detect_firewall)"
+	echo ""
+
+	# Core TCP 端口
+	for port in $FIREWALL_PORTS_CORE_TCP; do
+		open_firewall_port "$port" "tcp"
+	done
+
+	# Core UDP 端口
+	for port in $FIREWALL_PORTS_CORE_UDP; do
+		open_firewall_port "$port" "udp"
+	done
+
+	# RPC 端口（TCP）
+	open_firewall_port "$FIREWALL_PORT_RPC" "tcp"
+
+	# Web 控制台端口（TCP）
+	open_firewall_port "$FIREWALL_PORT_WEB" "tcp"
+
+	# 配置下发端口
+	open_firewall_port "$FIREWALL_PORT_CONFIG_SERVER" "tcp"
+	open_firewall_port "$FIREWALL_PORT_CONFIG_SERVER" "udp"
+
+	echo -e "${GREEN}--- EasyTier 端口配置完成 ---${NC}"
+}
+
+# 一键关闭 EasyTier 所有端口
+close_all_easytier_ports() {
+	echo -e "${BLUE}--- 正在关闭 EasyTier 相关端口 ---${NC}"
+	echo "检测到防火墙类型: $(detect_firewall)"
+	echo ""
+
+	# Core TCP 端口
+	for port in $FIREWALL_PORTS_CORE_TCP; do
+		close_firewall_port "$port" "tcp"
+	done
+
+	# Core UDP 端口
+	for port in $FIREWALL_PORTS_CORE_UDP; do
+		close_firewall_port "$port" "udp"
+	done
+
+	# RPC 端口（TCP）
+	close_firewall_port "$FIREWALL_PORT_RPC" "tcp"
+
+	# Web 控制台端口（TCP）
+	close_firewall_port "$FIREWALL_PORT_WEB" "tcp"
+
+	# 配置下发端口
+	close_firewall_port "$FIREWALL_PORT_CONFIG_SERVER" "tcp"
+	close_firewall_port "$FIREWALL_PORT_CONFIG_SERVER" "udp"
+
+	echo -e "${GREEN}--- EasyTier 端口关闭完成 ---${NC}"
+}
+
+# 检查 EasyTier 端口状态
+check_all_easytier_ports() {
+	echo -e "${BLUE}--- EasyTier 端口状态检查 ---${NC}"
+	echo "检测到防火墙类型: $(detect_firewall)"
+	echo ""
+
+	# Core TCP 端口
+	echo -e "${BLUE}Core TCP 端口:${NC}"
+	for port in $FIREWALL_PORTS_CORE_TCP; do
+		if check_firewall_port "$port" "tcp" 2>/dev/null; then
+			echo -e "  ${GREEN}✓${NC} ${port}/tcp - 已放行"
+		else
+			echo -e "  ${RED}✗${NC} ${port}/tcp - 未放行"
+		fi
+	done
+
+	# Core UDP 端口
+	echo -e "${BLUE}Core UDP 端口:${NC}"
+	for port in $FIREWALL_PORTS_CORE_UDP; do
+		if check_firewall_port "$port" "udp" 2>/dev/null; then
+			echo -e "  ${GREEN}✓${NC} ${port}/udp - 已放行"
+		else
+			echo -e "  ${RED}✗${NC} ${port}/udp - 未放行"
+		fi
+	done
+
+	# RPC 端口
+	echo -e "${BLUE}RPC 管理端口:${NC}"
+	if check_firewall_port "$FIREWALL_PORT_RPC" "tcp" 2>/dev/null; then
+		echo -e "  ${GREEN}✓${NC} ${FIREWALL_PORT_RPC}/tcp - 已放行"
+	else
+		echo -e "  ${RED}✗${NC} ${FIREWALL_PORT_RPC}/tcp - 未放行"
+	fi
+
+	# Web 控制台端口
+	echo -e "${BLUE}Web 控制台端口:${NC}"
+	if check_firewall_port "$FIREWALL_PORT_WEB" "tcp" 2>/dev/null; then
+		echo -e "  ${GREEN}✓${NC} ${FIREWALL_PORT_WEB}/tcp - 已放行"
+	else
+		echo -e "  ${RED}✗${NC} ${FIREWALL_PORT_WEB}/tcp - 未放行"
+	fi
+
+	# 配置下发端口
+	echo -e "${BLUE}配置下发端口:${NC}"
+	if check_firewall_port "$FIREWALL_PORT_CONFIG_SERVER" "tcp" 2>/dev/null; then
+		echo -e "  ${GREEN}✓${NC} ${FIREWALL_PORT_CONFIG_SERVER}/tcp - 已放行"
+	else
+		echo -e "  ${RED}✗${NC} ${FIREWALL_PORT_CONFIG_SERVER}/tcp - 未放行"
+	fi
+	if check_firewall_port "$FIREWALL_PORT_CONFIG_SERVER" "udp" 2>/dev/null; then
+		echo -e "  ${GREEN}✓${NC} ${FIREWALL_PORT_CONFIG_SERVER}/udp - 已放行"
+	else
+		echo -e "  ${RED}✗${NC} ${FIREWALL_PORT_CONFIG_SERVER}/udp - 未放行"
+	fi
+}
+
+
+# --- 公共节点管理功能 ---
+
+# 从 URI 中解析协议、主机和端口
+parse_node_uri() {
+	local uri="$1"
+	local protocol host port
+
+	if [[ "$uri" =~ ^([a-zA-Z]+)://([^:/]+):([0-9]+) ]]; then
+		protocol="${BASH_REMATCH[1]}"
+		host="${BASH_REMATCH[2]}"
+		port="${BASH_REMATCH[3]}"
+		echo "$protocol $host $port"
+		return 0
+	else
+		echo ""
+		return 1
+	fi
+}
+
+# 测试单个节点的 TCP 连接延迟
+test_node_latency() {
+	local uri="$1"
+	local parsed; parsed=$(parse_node_uri "$uri")
+	if [ -z "$parsed" ]; then
+		echo "N/A"
+		return 1
+	fi
+
+	local protocol host port
+	read -r protocol host port <<< "$parsed"
+
+	# 对于非 TCP 协议（UDP、WS、WSS），降级使用 TCP 端口测试
+	# 因为无法直接测试 UDP 延迟，WS/WSS 也需要完整握手
+	if [ "$protocol" = "udp" ]; then
+		# UDP 节点用同一端口的 TCP 测试，或使用 ping 测试主机延迟
+		protocol="tcp"
+	elif [ "$protocol" = "ws" ] || [ "$protocol" = "wss" ]; then
+		protocol="tcp"
+	fi
+
+	# 使用 timeout + bash 的 /dev/tcp 测试延迟
+	local start end latency
+	start=$(date +%s%N 2>/dev/null || date +%s)
+	if timeout "$NODE_PING_TIMEOUT" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+		end=$(date +%s%N 2>/dev/null || date +%s)
+		# 计算延迟（毫秒）
+		if echo "$start" | grep -q "N"; then
+			latency=$(( (end - start) / 1000000 ))
+		else
+			latency=$(( (end - start) * 1000 ))
+		fi
+		echo "$latency"
+		return 0
+	else
+		echo "timeout"
+		return 1
+	fi
+}
+
+# 获取所有公共节点列表（内置 + 可选 API）
+get_all_public_nodes() {
+	local all_nodes=()
+
+	# 添加官方节点
+	for node in "${BUILTIN_PUBLIC_NODES[@]}"; do
+		all_nodes+=("官方|$node")
+	done
+
+	# 添加社区节点
+	for node in "${BUILTIN_COMMUNITY_NODES[@]}"; do
+		all_nodes+=("社区|$node")
+	done
+
+	# 尝试从 API 获取更多节点
+	if command -v curl &>/dev/null && command -v jq &>/dev/null; then
+		local api_data; api_data=$(curl -sL --connect-timeout 5 "$EASYTIER_NODES_API" 2>/dev/null)
+		if [ -n "$api_data" ] && echo "$api_data" | jq . >/dev/null 2>&1; then
+			# 解析 API 返回的节点列表
+			local nodes_count; nodes_count=$(echo "$api_data" | jq '.data | length' 2>/dev/null || echo "0")
+			if [ "$nodes_count" -gt 0 ] 2>/dev/null; then
+				for i in $(seq 0 $((nodes_count - 1))); do
+					local name addr status
+					name=$(echo "$api_data" | jq -r ".data[$i].name" 2>/dev/null || echo "unknown")
+					addr=$(echo "$api_data" | jq -r ".data[$i].addr" 2>/dev/null || echo "")
+					status=$(echo "$api_data" | jq -r ".data[$i].status" 2>/dev/null || echo "unknown")
+					if [ -n "$addr" ] && [ "$addr" != "null" ]; then
+						all_nodes+=("API|$addr|$name|$status")
+					fi
+				done
+			fi
+		fi
+	fi
+
+	# 输出所有节点
+	for node in "${all_nodes[@]}"; do
+		echo "$node"
+	done
+}
+
+# 测试所有公共节点并按延迟排序
+test_all_nodes() {
+	echo -e "${BLUE}正在获取公共节点列表...${NC}"
+	local nodes; nodes=$(get_all_public_nodes)
+	local total_nodes; total_nodes=$(echo "$nodes" | wc -l)
+
+	echo -e "${GREEN}共找到 ${total_nodes} 个公共节点${NC}"
+	echo -e "${BLUE}开始测速（每个节点约 ${NODE_PING_TIMEOUT} 秒超时）...${NC}"
+	echo ""
+
+	local results=()
+	local index=0
+
+	while IFS='|' read -r source uri extra1 extra2; do
+		index=$((index + 1))
+		local display_name
+		if [ "$source" = "官方" ]; then
+			display_name="[官方] ${uri}"
+		elif [ "$source" = "社区" ]; then
+			display_name="[社区] ${uri}"
+		elif [ "$source" = "API" ]; then
+			display_name="[API] ${extra1} (${uri})"
+		else
+			display_name="${uri}"
+		fi
+
+		printf "  [%d/%d] 测试 %-60s " "$index" "$total_nodes" "$display_name"
+		local latency; latency=$(test_node_latency "$uri")
+
+		if [ "$latency" = "timeout" ]; then
+			echo -e "${RED}超时${NC}"
+			results+=("999999|${display_name}|${uri}|超时")
+		else
+			echo -e "${GREEN}${latency}ms${NC}"
+			results+=("${latency}|${display_name}|${uri}|${latency}ms")
+		fi
+	done <<< "$nodes"
+
+	# 按延迟排序并保存到缓存
+	mkdir -p "$CONFIG_DIR"
+	printf "%s\n" "${results[@]}" | sort -t'|' -k1 -n > "$NODES_CACHE_FILE"
+
+	echo ""
+	echo -e "${GREEN}测速完成！结果已按延迟排序。${NC}"
+	echo -e "${YELLOW}缓存文件: ${NODES_CACHE_FILE}${NC}"
+}
+
+# 显示测速结果
+show_latency_results() {
+	if [ ! -f "$NODES_CACHE_FILE" ]; then
+		echo -e "${YELLOW}暂无测速结果，请先运行测速。${NC}"
+		return 1
+	fi
+
+	echo -e "${BLUE}--- 公共节点延迟排名 ---${NC}"
+	echo ""
+	printf "%-5s %-65s %s\n" "排名" "节点" "延迟"
+	echo "------------------------------------------------------------"
+
+	local rank=0
+	while IFS='|' read -r _latency display_name uri latency_str; do
+		rank=$((rank + 1))
+		if [ "$latency_str" = "超时" ]; then
+			printf "%-5s %-65s %s\n" "$rank" "$display_name" "${RED}${latency_str}${NC}"
+		else
+			# 根据延迟设置颜色
+			if [ "$_latency" -lt 50 ]; then
+				printf "%-5s %-65s %s\n" "$rank" "$display_name" "${GREEN}${latency_str}${NC}"
+			elif [ "$_latency" -lt 150 ]; then
+				printf "%-5s %-65s %s\n" "$rank" "$display_name" "${YELLOW}${latency_str}${NC}"
+			else
+				printf "%-5s %-65s %s\n" "$rank" "$display_name" "${latency_str}"
+			fi
+		fi
+	done < "$NODES_CACHE_FILE"
+
+	echo ""
+	echo -e "${BLUE}提示: 数字越小延迟越好${NC}"
+}
+
+# 快速选择最优节点并添加为 peer
+select_fastest_node() {
+	if [ ! -f "$NODES_CACHE_FILE" ]; then
+		echo -e "${YELLOW}暂无测速结果，正在自动测速...${NC}"
+		test_all_nodes
+	fi
+
+	# 获取最快的节点
+	local fastest; fastest=$(head -n 1 "$NODES_CACHE_FILE")
+	if [ -z "$fastest" ]; then
+		echo -e "${RED}未找到可用节点${NC}"
+		return 1
+	fi
+
+	local uri; uri=$(echo "$fastest" | cut -d'|' -f3)
+	local display_name; display_name=$(echo "$fastest" | cut -d'|' -f2)
+	local latency_str; latency_str=$(echo "$fastest" | cut -d'|' -f4)
+
+	echo -e "${GREEN}最快节点: ${display_name}${NC}"
+	echo -e "${GREEN}延迟: ${latency_str}${NC}"
+	echo ""
+
+	read -p "是否将此节点添加为 peer? (y/n): " choice
+	if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
+		if [ -f "$CONFIG_FILE" ]; then
+			add_peer_uri "$uri" "$CONFIG_FILE"
+			echo -e "${YELLOW}正在重启服务以应用配置...${NC}"
+			restart_service
+			echo -e "${GREEN}已添加最快节点并重启服务！${NC}"
+		else
+			echo -e "${RED}配置文件不存在，请先部署网络。${NC}"
+		fi
+	fi
+}
+
+# 手动选择节点添加为 peer
+select_node_manually() {
+	if [ ! -f "$NODES_CACHE_FILE" ]; then
+		echo -e "${YELLOW}暂无测速结果，正在自动测速...${NC}"
+		test_all_nodes
+	fi
+
+	echo -e "${BLUE}--- 选择节点添加为 Peer ---${NC}"
+	echo ""
+
+	local nodes=()
+	local index=0
+
+	while IFS='|' read -r _latency display_name uri latency_str; do
+		index=$((index + 1))
+		nodes+=("$uri")
+		printf "%3d. %-60s %s\n" "$index" "$display_name" "$latency_str"
+	done < "$NODES_CACHE_FILE"
+
+	echo ""
+	read -p "请输入节点编号添加为 peer (0 取消): " choice
+
+	if [ "$choice" -gt 0 ] 2>/dev/null && [ "$choice" -le "$index" ]; then
+		local selected_uri="${nodes[$((choice - 1))]}"
+		if [ -f "$CONFIG_FILE" ]; then
+			add_peer_uri "$selected_uri" "$CONFIG_FILE"
+			echo -e "${YELLOW}正在重启服务以应用配置...${NC}"
+			restart_service
+			echo -e "${GREEN}已添加节点并重启服务！${NC}"
+		else
+			echo -e "${RED}配置文件不存在，请先部署网络。${NC}"
+		fi
+	fi
 }
 
 
@@ -548,6 +1143,19 @@ EOF
 
 deploy_new_network() { 
 	check_installed || return 1
+	
+	# 显示现有网络配置（如果存在）
+	if [ -f "$CONFIG_FILE" ]; then
+		echo -e "${BLUE}--- 当前网络配置 ---${NC}"
+		echo "网络名称: $(grep 'network_name' "$CONFIG_FILE" 2>/dev/null | sed 's/network_name\s*=\s*"\([^"]*\)"/\1/' || echo '(未设置)')"
+		echo "网络密钥: $(grep 'network_secret' "$CONFIG_FILE" 2>/dev/null | sed 's/network_secret\s*=\s*"\([^"]*\)"/\1/' || echo '(未设置)')"
+		echo "虚拟IPv4: $(grep 'ipv4' "$CONFIG_FILE" 2>/dev/null | sed 's/ipv4\s*=\s*"\([^"]*\)"/\1/' || echo '(未设置)')"
+		echo "DHCP: $(grep 'dhcp' "$CONFIG_FILE" 2>/dev/null | sed 's/dhcp\s*=\s*\(.*\)/\1/' || echo 'false')"
+		echo ""
+		echo -e "${YELLOW}提示: 留空将保留现有配置${NC}"
+		echo ""
+	fi
+	
 	read -p "请输入网络名称 (留空保留现有): " network_name
 	read -p "请输入网络密钥 (留空保留现有): " network_secret
 	read -p "请输入此虚拟IP (回车则启用DHCP，留空保留现有): " virtual_ip
@@ -703,14 +1311,21 @@ advanced_config_menu() {
 		read -p "请输入选项 [0-31]: " sub
 
 		case $sub in
-		1) read -p "新的网络名称: " val; set_toml_value "network_name" "\"$val\"" "$CONFIG_FILE" ;;
-		2) read -p "新的网络密钥: " val; set_toml_value "network_secret" "\"$val\"" "$CONFIG_FILE" ;;
-		3) read -p "新的虚拟IPv4地址 (留空则清空): " val;
+		1) echo "当前网络名称: $(grep 'network_name' "$CONFIG_FILE" 2>/dev/null | sed 's/network_name\s*=\s*"\([^"]*\)"/\1/' || echo '(未设置)')";
+		   read -p "新的网络名称: " val; set_toml_value "network_name" "\"$val\"" "$CONFIG_FILE" ;;
+		2) echo "当前网络密钥: $(grep 'network_secret' "$CONFIG_FILE" 2>/dev/null | sed 's/network_secret\s*=\s*"\([^"]*\)"/\1/' || echo '(未设置)')";
+		   read -p "新的网络密钥: " val; set_toml_value "network_secret" "\"$val\"" "$CONFIG_FILE" ;;
+		3) echo "当前虚拟IPv4: $(grep 'ipv4' "$CONFIG_FILE" 2>/dev/null | sed 's/ipv4\s*=\s*"\([^"]*\)"/\1/' || echo '(未设置)')";
+		   echo "当前 DHCP: $(grep 'dhcp' "$CONFIG_FILE" 2>/dev/null | sed 's/dhcp\s*=\s*\(.*\)/\1/' || echo 'false')";
+		   read -p "新的虚拟IPv4地址 (留空则清空): " val;
 		   if [ -z "$val" ]; then set_toml_value "ipv4" "\"\"" "$CONFIG_FILE"; set_toml_value "dhcp" "false" "$CONFIG_FILE";
 		   else set_toml_value "ipv4" "\"$val\"" "$CONFIG_FILE"; set_toml_value "dhcp" "false" "$CONFIG_FILE"; fi ;;
-		4) read -p "是否启用 DHCP? (true/false): " val; set_toml_value "dhcp" "$val" "$CONFIG_FILE" ;;
-		5) read -p "主机名 (留空使用系统默认): " val; add_toml_entry "hostname" "\"$val\"" "$CONFIG_FILE" ;;
-		6) read -p "实例名 (用于区分多实例): " val; add_toml_entry "instance_name" "\"$val\"" "$CONFIG_FILE" ;;
+		4) echo "当前 DHCP: $(grep 'dhcp' "$CONFIG_FILE" 2>/dev/null | sed 's/dhcp\s*=\s*\(.*\)/\1/' || echo 'false')";
+		   read -p "是否启用 DHCP? (true/false): " val; set_toml_value "dhcp" "$val" "$CONFIG_FILE" ;;
+		5) echo "当前主机名: $(grep 'hostname' "$CONFIG_FILE" 2>/dev/null | sed 's/hostname\s*=\s*"\([^"]*\)"/\1/' || echo '(系统默认)')";
+		   read -p "主机名 (留空使用系统默认): " val; add_toml_entry "hostname" "\"$val\"" "$CONFIG_FILE" ;;
+		6) echo "当前实例名: $(grep 'instance_name' "$CONFIG_FILE" 2>/dev/null | sed 's/instance_name\s*=\s*"\([^"]*\)"/\1/' || echo 'default')";
+		   read -p "实例名 (用于区分多实例): " val; add_toml_entry "instance_name" "\"$val\"" "$CONFIG_FILE" ;;
 		7) echo "当前监听地址:";
 		   grep "^listeners" "$CONFIG_FILE" 2>/dev/null || echo "(未设置)"
 		   echo "格式: [\"udp://0.0.0.0:11010\", \"tcp://0.0.0.0:11010\"]"
@@ -721,8 +1336,10 @@ advanced_config_menu() {
 		   read -p "操作: [a]添加 [d]清空所有 [c]取消: " act
 		   if [ "$act" = "a" ]; then read -p "对端节点URI (如 udp://1.2.3.4:11010): " val; add_peer_uri "$val" "$CONFIG_FILE";
 		   elif [ "$act" = "d" ]; then sed -i.bak "/^\[\[peer\]\]/d;/^uri\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已清空所有对端节点。${NC}"; fi ;;
-		9) read -p "外部发现节点地址 (如 udp://public.easytier.top:11010): " val; add_toml_entry "external_node" "\"$val\"" "$CONFIG_FILE" ;;
-		10) read -p "默认协议 (tcp/udp/wg/ws/wss): " val; set_toml_value "default_protocol" "\"$val\"" "$CONFIG_FILE" ;;
+		9) echo "当前外部发现节点: $(grep 'external_node' "$CONFIG_FILE" 2>/dev/null | sed 's/external_node\s*=\s*"\([^"]*\)"/\1/' || echo '(未设置)')";
+		   read -p "外部发现节点地址 (如 udp://public.easytier.top:11010): " val; add_toml_entry "external_node" "\"$val\"" "$CONFIG_FILE" ;;
+		10) echo "当前默认协议: $(grep 'default_protocol' "$CONFIG_FILE" 2>/dev/null | sed 's/default_protocol\s*=\s*"\([^"]*\)"/\1/' || echo 'udp')";
+		    read -p "默认协议 (tcp/udp/wg/ws/wss): " val; set_toml_value "default_protocol" "\"$val\"" "$CONFIG_FILE" ;;
 		11) echo "当前 RPC Portal:";
 		    grep "^rpc_portal" "$CONFIG_FILE" 2>/dev/null || echo "(未设置，默认 ${DEFAULT_RPC_PORTAL})"
 		    read -p "新的 RPC Portal (如 127.0.0.1:15888，0 为随机端口): " val
@@ -797,18 +1414,30 @@ advanced_config_menu() {
 		    read -p "手动路由 CIDR 列表 (逗号分隔, 如 10.1.0.0/16,10.2.0.0/16，留空则清空): " val
 		    if [ -n "$val" ]; then add_manual_routes "$val" "$CONFIG_FILE";
 		    else sed -i.bak "/^manual_routes\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已清空手动路由。${NC}"; fi ;;
-		18) read -p "MTU 值 (加密默认1400，未加密默认1420): " val; set_toml_value "mtu" "$val" "$CONFIG_FILE" ;;
-		19) read -p "延迟优先模式 (true/false): " val; set_toml_value "latency_first" "$val" "$CONFIG_FILE" ;;
-		20) read -p "多线程模式 (true/false): " val; add_toml_entry "multi_thread" "$val" "$CONFIG_FILE" ;;
-		21) read -p "启用加密 (true/false): " val; set_toml_value "enable_encryption" "$val" "$CONFIG_FILE" ;;
-		22) read -p "启用 IPv6 (true/false): " val; set_toml_value "enable_ipv6" "$val" "$CONFIG_FILE" ;;
-		23) read -p "禁用 P2P (true/false): " val; set_toml_value "disable_p2p" "$val" "$CONFIG_FILE" ;;
-		24) read -p "禁用 UDP 打洞 (true/false): " val; set_toml_value "disable_udp_hole_punching" "$val" "$CONFIG_FILE" ;;
-		25) read -p "不创建 TUN 设备 (true/false): " val; set_toml_value "no_tun" "$val" "$CONFIG_FILE" ;;
-		26) read -p "启用 smoltcp 用户态栈 (true/false): " val; set_toml_value "use_smoltcp" "$val" "$CONFIG_FILE" ;;
-		27) read -p "启用 KCP 代理 (true/false): " val; set_toml_value "enableKcp_Proxy" "$val" "$CONFIG_FILE" ;;
-		28) read -p "中继所有 Peer RPC (true/false): " val; set_toml_value "relay_all_peer_rpc" "$val" "$CONFIG_FILE" ;;
-		29) read -p "私有模式 (true/false): " val; set_toml_value "private_mode" "$val" "$CONFIG_FILE" ;;
+		18) echo "当前 MTU: $(grep 'mtu' "$CONFIG_FILE" 2>/dev/null | sed 's/mtu\s*=\s*\([0-9]*\)/\1/' || echo '1380')";
+		    read -p "MTU 值 (加密默认1400，未加密默认1420): " val; set_toml_value "mtu" "$val" "$CONFIG_FILE" ;;
+		19) echo "当前延迟优先模式: $(grep 'latency_first' "$CONFIG_FILE" 2>/dev/null | sed 's/latency_first\s*=\s*\(.*\)/\1/' || echo 'true')";
+		    read -p "延迟优先模式 (true/false): " val; set_toml_value "latency_first" "$val" "$CONFIG_FILE" ;;
+		20) echo "当前多线程模式: $(grep 'multi_thread' "$CONFIG_FILE" 2>/dev/null | sed 's/multi_thread\s*=\s*\(.*\)/\1/' || echo 'false')";
+		    read -p "多线程模式 (true/false): " val; add_toml_entry "multi_thread" "$val" "$CONFIG_FILE" ;;
+		21) echo "当前加密开关: $(grep 'enable_encryption' "$CONFIG_FILE" 2>/dev/null | sed 's/enable_encryption\s*=\s*\(.*\)/\1/' || echo 'true')";
+		    read -p "启用加密 (true/false): " val; set_toml_value "enable_encryption" "$val" "$CONFIG_FILE" ;;
+		22) echo "当前 IPv6 开关: $(grep 'enable_ipv6' "$CONFIG_FILE" 2>/dev/null | sed 's/enable_ipv6\s*=\s*\(.*\)/\1/' || echo 'true')";
+		    read -p "启用 IPv6 (true/false): " val; set_toml_value "enable_ipv6" "$val" "$CONFIG_FILE" ;;
+		23) echo "当前 P2P 开关: $(grep 'disable_p2p' "$CONFIG_FILE" 2>/dev/null | sed 's/disable_p2p\s*=\s*\(.*\)/\1/' || echo 'false')";
+		    read -p "禁用 P2P (true/false): " val; set_toml_value "disable_p2p" "$val" "$CONFIG_FILE" ;;
+		24) echo "当前 UDP 打洞开关: $(grep 'disable_udp_hole_punching' "$CONFIG_FILE" 2>/dev/null | sed 's/disable_udp_hole_punching\s*=\s*\(.*\)/\1/' || echo 'false')";
+		    read -p "禁用 UDP 打洞 (true/false): " val; set_toml_value "disable_udp_hole_punching" "$val" "$CONFIG_FILE" ;;
+		25) echo "当前 TUN 设备开关: $(grep 'no_tun' "$CONFIG_FILE" 2>/dev/null | sed 's/no_tun\s*=\s*\(.*\)/\1/' || echo 'false')";
+		    read -p "不创建 TUN 设备 (true/false): " val; set_toml_value "no_tun" "$val" "$CONFIG_FILE" ;;
+		26) echo "当前 Smoltcp 栈开关: $(grep 'use_smoltcp' "$CONFIG_FILE" 2>/dev/null | sed 's/use_smoltcp\s*=\s*\(.*\)/\1/' || echo 'false')";
+		    read -p "启用 smoltcp 用户态栈 (true/false): " val; set_toml_value "use_smoltcp" "$val" "$CONFIG_FILE" ;;
+		27) echo "当前 KCP 代理开关: $(grep 'enableKcp_Proxy' "$CONFIG_FILE" 2>/dev/null | sed 's/enableKcp_Proxy\s*=\s*\(.*\)/\1/' || echo 'true')";
+		    read -p "启用 KCP 代理 (true/false): " val; set_toml_value "enableKcp_Proxy" "$val" "$CONFIG_FILE" ;;
+		28) echo "当前中继所有 RPC: $(grep 'relay_all_peer_rpc' "$CONFIG_FILE" 2>/dev/null | sed 's/relay_all_peer_rpc\s*=\s*\(.*\)/\1/' || echo 'false')";
+		    read -p "中继所有 Peer RPC (true/false): " val; set_toml_value "relay_all_peer_rpc" "$val" "$CONFIG_FILE" ;;
+		29) echo "当前私有模式: $(grep 'private_mode' "$CONFIG_FILE" 2>/dev/null | sed 's/private_mode\s*=\s*\(.*\)/\1/' || echo 'true')";
+		    read -p "私有模式 (true/false): " val; set_toml_value "private_mode" "$val" "$CONFIG_FILE" ;;
 		30) echo "日志配置:"
 		    echo "  console_log_level = $(grep 'console_log_level' "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
 		    echo "  file_log_level = $(grep 'file_log_level' "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
@@ -821,6 +1450,110 @@ advanced_config_menu() {
 		    if [ -n "$val" ]; then set_toml_value "foreign_network_whitelist" "\"$val\"" "$CONFIG_FILE"; fi ;;
 		0) break ;;
 		*) echo -e "${RED}无效输入${NC}" ;;
+		esac
+		echo -e "\n${YELLOW}按任意键继续...${NC}"; read -n 1 -s -r
+	done
+}
+
+# --- 防火墙管理菜单 ---
+firewall_menu() {
+	check_root || return 1
+	local fw_type; fw_type=$(detect_firewall)
+
+	while true; do
+		clear
+		echo "======================================================="
+		echo -e "   ${BLUE}EasyTier 防火墙端口管理${NC}"
+		echo "======================================================="
+		echo -e " 检测到的防火墙: ${GREEN}${fw_type}${NC}"
+		echo ""
+		echo " 1. 检查 EasyTier 端口状态"
+		echo " 2. 一键放行 EasyTier 所有端口"
+		echo " 3. 一键关闭 EasyTier 所有端口"
+		echo " 4. 手动开放单个端口"
+		echo " 5. 手动关闭单个端口"
+		echo ""
+		echo " 0. 返回主菜单"
+		echo "======================================================="
+		read -p "请输入选项 [0-5]: " sub
+
+		echo
+
+		case $sub in
+			1) check_all_easytier_ports ;;
+			2) open_all_easytier_ports ;;
+			3) close_all_easytier_ports ;;
+			4) 
+				read -p "请输入端口号: " port
+				read -p "请输入协议 (tcp/udp): " protocol
+				if [ -n "$port" ] && [ -n "$protocol" ]; then
+					open_firewall_port "$port" "$protocol"
+				else
+					echo -e "${RED}端口和协议不能为空${NC}"
+				fi
+				;;
+			5) 
+				read -p "请输入端口号: " port
+				read -p "请输入协议 (tcp/udp): " protocol
+				if [ -n "$port" ] && [ -n "$protocol" ]; then
+					close_firewall_port "$port" "$protocol"
+				else
+					echo -e "${RED}端口和协议不能为空${NC}"
+				fi
+				;;
+			0) break ;;
+			*) echo -e "${RED}无效输入${NC}" ;;
+		esac
+		echo -e "\n${YELLOW}按任意键继续...${NC}"; read -n 1 -s -r
+	done
+}
+
+# --- 公共节点管理菜单 ---
+public_nodes_menu() {
+	while true; do
+		clear
+		echo "======================================================="
+		echo -e "   ${BLUE}EasyTier 公共节点管理${NC}"
+		echo "======================================================="
+		echo " 1. 查看公共节点列表"
+		echo " 2. 测试所有节点延迟"
+		echo " 3. 查看延迟排名结果"
+		echo " 4. 一键使用最快节点（自动添加为 Peer）"
+		echo " 5. 手动选择节点添加为 Peer"
+		echo " 6. 刷新节点缓存（重新测速）"
+		echo ""
+		echo " 0. 返回主菜单"
+		echo "======================================================="
+		read -p "请输入选项 [0-6]: " sub
+
+		echo
+
+		case $sub in
+			1) 
+				echo -e "${BLUE}--- 公共节点列表 ---${NC}"
+				echo ""
+				echo "官方节点:"
+				for node in "${BUILTIN_PUBLIC_NODES[@]}"; do
+					echo "  ${GREEN}✓${NC} $node"
+				done
+				echo ""
+				echo "社区节点:"
+				for node in "${BUILTIN_COMMUNITY_NODES[@]}"; do
+					echo "  ${GREEN}✓${NC} $node"
+				done
+				echo ""
+				echo -e "${YELLOW}提示: 还可以从官方 API 获取更多节点（选项2测速时自动获取）${NC}"
+				;;
+			2) test_all_nodes ;;
+			3) show_latency_results ;;
+			4) select_fastest_node ;;
+			5) select_node_manually ;;
+			6) 
+				rm -f "$NODES_CACHE_FILE"
+				echo -e "${GREEN}已清除缓存，下次测速将重新获取节点列表。${NC}"
+				;;
+			0) break ;;
+			*) echo -e "${RED}无效输入${NC}" ;;
 		esac
 		echo -e "\n${YELLOW}按任意键继续...${NC}"; read -n 1 -s -r
 	done
@@ -1145,12 +1878,14 @@ main() {
 		echo -e " ${BLUE}--- 运维工具 ---${NC}"
 		echo "  9. CLI 工具箱 (peer/route/vpn-portal/node)"
 		echo " 10. 查看组网节点"
+		echo " 13. 公共节点管理（测速+一键最快）"
+		echo " 12. 防火墙端口管理"
 		echo ""
 		echo -e " ${RED}--- 系统 ---${NC}"
 		echo " 11. 卸载 EasyTier"
 		echo "  0. 退出脚本"
 		echo "======================================================="
-		read -p "请输入选项 [0-11]: " choice
+		read -p "请输入选项 [0-13]: " choice
 		
 		echo
 		
@@ -1165,6 +1900,8 @@ main() {
 			8) manage_web_service ;;
 			9) cli_toolbox_menu ;;
 			10) if check_installed; then ${INSTALL_DIR}/${CLI_BINARY_NAME} peer; fi ;;
+			13) public_nodes_menu ;;
+			12) firewall_menu ;;
 			11) uninstall_easytier ;;
 			0) exit 0 ;;
 			*) echo -e "${RED}无效输入${NC}" ;;
