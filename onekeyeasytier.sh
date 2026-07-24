@@ -34,6 +34,8 @@ WEB_SERVICE_FILE=""
 WEB_SERVICE_LABEL="com.easytier.web"
 WEB_LOG_FILE="/var/log/easytier-web.log"
 WEB_CONFIG_FILE="${CONFIG_DIR}/easytier-web.env"
+# Core 连接 Web 控制台的配置文件（单独存储，不写入 TOML）
+CORE_WEB_SERVER_FILE="${CONFIG_DIR}/.web_server"
 
 # --- 高级配置默认值 ---
 DEFAULT_RPC_PORTAL="127.0.0.1:15888"
@@ -211,10 +213,10 @@ create_service_file() {
         chmod 644 "$LOG_FILE"
     fi
 
-    # 读取 web_server 配置（用于连接 Web 控制台）
+    # 读取 web_server 配置（从单独文件读取，避免污染 TOML）
     local web_server_config=""
-    if [ -f "$CONFIG_FILE" ]; then
-        web_server_config=$(grep "^web_server\s*=" "$CONFIG_FILE" 2>/dev/null | sed 's/^web_server\s*=\s*"\([^"]*\)"/\1/')
+    if [ -f "$CORE_WEB_SERVER_FILE" ]; then
+        web_server_config=$(cat "$CORE_WEB_SERVER_FILE" 2>/dev/null | tr -d '\n')
     fi
     local web_server_arg=""
     if [ -n "$web_server_config" ]; then
@@ -257,11 +259,35 @@ depend() {
 EOL
         chmod +x "${SERVICE_FILE}";
     elif [[ "$OS_TYPE" == "macos" ]]; then
-        local web_server_xml=""
         if [ -n "$web_server_config" ]; then
-            web_server_xml="<string>-w</string>\n        <string>${web_server_config}</string>"
-        fi
-        cat > "${SERVICE_FILE}" << EOL
+            # 使用 printf 确保正确的换行符
+            printf '<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>%s</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>%s</string>
+        <string>-c</string>
+        <string>%s</string>
+        <string>-w</string>
+        <string>%s</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>%s</string>
+    <key>StandardErrorPath</key>
+    <string>%s</string>
+</dict>
+</plist>
+' "$SERVICE_LABEL" "$INSTALL_DIR/$CORE_BINARY_NAME" "$CONFIG_FILE" "$web_server_config" "$LOG_FILE" "$LOG_FILE" > "${SERVICE_FILE}"
+        else
+            cat > "${SERVICE_FILE}" << EOL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -273,7 +299,6 @@ EOL
         <string>${INSTALL_DIR}/${CORE_BINARY_NAME}</string>
         <string>-c</string>
         <string>${CONFIG_FILE}</string>
-        ${web_server_xml}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -286,6 +311,7 @@ EOL
 </dict>
 </plist>
 EOL
+        fi
     fi
     echo -e "${GREEN}EasyTier Core 服务文件创建/更新成功: ${SERVICE_FILE}${NC}"
 }
@@ -516,8 +542,6 @@ disable_udp_hole_punching = false
 enableKcp_Proxy = true
 # 新增：默认开启私有模式（仅允许相同network_name/network_secret的节点连接）
 private_mode = true
-# 连接 Web 控制台配置（通过高级配置菜单设置，格式: udp://127.0.0.1:22020/admin）
-# web_server = ""
 EOF
 	if [ $? -eq 0 ]; then echo "已成功创建默认配置文件: ${CONFIG_FILE}"; return 0;
 	else echo -e "${RED}错误: 创建配置文件失败!${NC}"; return 1; fi; }
@@ -681,12 +705,37 @@ advanced_config_menu() {
 		    read -p "新的 RPC Portal (如 127.0.0.1:15888，0 为随机端口): " val
 		    if [ -n "$val" ]; then add_toml_entry "rpc_portal" "\"$val\"" "$CONFIG_FILE"; fi ;;
 		12) echo "连接 Web 控制台:"
-		    echo "当前 web_server: $(grep "^web_server" "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
+		    echo "当前 web_server: $(cat "$CORE_WEB_SERVER_FILE" 2>/dev/null || echo '(未设置)')"
 		    echo "格式: <protocol>://<host>:<port>/<username>"
 		    echo "示例: udp://127.0.0.1:22020/admin"
+		    echo ""
+		    echo "注意: <username>是你在Web控制台注册的用户名，必须包含!"
 		    read -p "Web 控制台地址 (留空则删除): " val
-		    if [ -n "$val" ]; then add_toml_entry "web_server" "\"$val\"" "$CONFIG_FILE";
-		    else sed -i.bak "/^web_server\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已删除 Web 控制台连接配置。${NC}"; fi ;;
+		    if [ -n "$val" ]; then
+		        # 验证格式是否包含用户名部分
+		        if [[ ! "$val" =~ ^[a-zA-Z]+://[^/]+/.+$ ]]; then
+		            echo -e "${RED}错误: 地址格式不正确，缺少用户名部分!${NC}"
+		            echo -e "${YELLOW}正确格式示例: udp://127.0.0.1:22020/admin${NC}"
+		        else
+		            # 写入单独的配置文件（不污染 TOML）
+		            mkdir -p "$CONFIG_DIR"
+		            echo "$val" > "$CORE_WEB_SERVER_FILE"
+		            echo -e "${GREEN}已设置 web_server = ${val}${NC}"
+		            echo -e "${YELLOW}配置已更新，正在重新生成服务文件并重启服务...${NC}"
+		            create_service_file
+		            reload_service_daemon
+		            restart_service
+		            echo -e "${GREEN}服务已重启，Core 将连接到 Web 控制台。${NC}"
+		        fi
+		    else
+		        # 删除配置文件
+		        rm -f "$CORE_WEB_SERVER_FILE"
+		        echo -e "${YELLOW}已删除 Web 控制台连接配置。${NC}"
+		        echo -e "${YELLOW}正在重新生成服务文件并重启服务...${NC}"
+		        create_service_file
+		        reload_service_daemon
+		        restart_service
+		    fi ;;
 		13) echo "出口节点配置:"
 		    echo "  enable_exit_node = $(grep 'enable_exit_node' "$CONFIG_FILE" 2>/dev/null || echo 'false')"
 		    echo "  exit_nodes = $(grep 'exit_nodes' "$CONFIG_FILE" 2>/dev/null || echo '(空)')"
