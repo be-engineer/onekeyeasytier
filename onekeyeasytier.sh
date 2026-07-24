@@ -281,7 +281,8 @@ check_firewalld_port() {
 # 检查端口是否已在防火墙中放行（iptables）
 check_iptables_port() {
 	local port="$1" protocol="$2"
-	if iptables -L INPUT -n 2>/dev/null | grep -q "dpt:${port}.*${protocol}"; then
+	# 使用 sudo 执行 iptables，并改进匹配模式
+	if sudo iptables -L INPUT -n 2>/dev/null | grep -E -- "-p ${protocol}\b.*--dport\s+${port}\b"; then
 		return 0
 	else
 		return 1
@@ -341,15 +342,15 @@ open_firewalld_port() {
 open_iptables_port() {
 	local port="$1" protocol="$2"
 	if check_iptables_port "$port" "$protocol"; then
-		echo -e "${GREEN}端口 ${port}/${protocol} 已在 iptables 中放行${NC}"
+		echo "端口 ${port}/${protocol} 已在 iptables 中放行"
 		return 0
 	fi
-	iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT &>/dev/null
+	sudo iptables -A INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
 	if check_iptables_port "$port" "$protocol"; then
-		echo -e "${GREEN}已在 iptables 中放行端口 ${port}/${protocol}${NC}"
+		echo "已在 iptables 中放行端口 ${port}/${protocol}"
 		return 0
 	else
-		echo -e "${RED}iptables 放行端口 ${port}/${protocol} 失败${NC}"
+		echo "iptables 放行端口 ${port}/${protocol} 失败，可能需要手动配置"
 		return 1
 	fi
 }
@@ -407,15 +408,15 @@ close_firewalld_port() {
 close_iptables_port() {
 	local port="$1" protocol="$2"
 	if ! check_iptables_port "$port" "$protocol"; then
-		echo -e "${YELLOW}端口 ${port}/${protocol} 未在 iptables 中放行${NC}"
+		echo "端口 ${port}/${protocol} 未在 iptables 中放行"
 		return 0
 	fi
-	iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT &>/dev/null
+	sudo iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>&1
 	if ! check_iptables_port "$port" "$protocol"; then
-		echo -e "${GREEN}已在 iptables 中关闭端口 ${port}/${protocol}${NC}"
+		echo "已在 iptables 中关闭端口 ${port}/${protocol}"
 		return 0
 	else
-		echo -e "${RED}iptables 关闭端口 ${port}/${protocol} 失败${NC}"
+		echo "iptables 关闭端口 ${port}/${protocol} 失败，可能需要手动配置"
 		return 1
 	fi
 }
@@ -701,11 +702,11 @@ test_all_nodes() {
 # 显示测速结果
 show_latency_results() {
 	if [ ! -f "$NODES_CACHE_FILE" ]; then
-		echo -e "${YELLOW}暂无测速结果，请先运行测速。${NC}"
+		echo "暂无测速结果，请先运行测速。"
 		return 1
 	fi
 
-	echo -e "${BLUE}--- 公共节点延迟排名 ---${NC}"
+	echo "--- 公共节点延迟排名 ---"
 	echo ""
 	printf "%-5s %-65s %s\n" "排名" "节点" "延迟"
 	echo "------------------------------------------------------------"
@@ -714,21 +715,21 @@ show_latency_results() {
 	while IFS='|' read -r _latency display_name uri latency_str; do
 		rank=$((rank + 1))
 		if [ "$latency_str" = "超时" ]; then
-			printf "%-5s %-65s %s\n" "$rank" "$display_name" "${RED}${latency_str}${NC}"
+			printf "%-5s %-65s [超时]\n" "$rank" "$display_name"
 		else
-			# 根据延迟设置颜色
+			# 根据延迟设置标记
 			if [ "$_latency" -lt 50 ]; then
-				printf "%-5s %-65s %s\n" "$rank" "$display_name" "${GREEN}${latency_str}${NC}"
+				printf "%-5s %-65s %s [优秀]\n" "$rank" "$display_name" "$latency_str"
 			elif [ "$_latency" -lt 150 ]; then
-				printf "%-5s %-65s %s\n" "$rank" "$display_name" "${YELLOW}${latency_str}${NC}"
+				printf "%-5s %-65s %s [良好]\n" "$rank" "$display_name" "$latency_str"
 			else
-				printf "%-5s %-65s %s\n" "$rank" "$display_name" "${latency_str}"
+				printf "%-5s %-65s %s\n" "$rank" "$display_name" "$latency_str"
 			fi
 		fi
 	done < "$NODES_CACHE_FILE"
 
 	echo ""
-	echo -e "${BLUE}提示: 数字越小延迟越好${NC}"
+	echo "提示: 数字越小延迟越好"
 }
 
 # 快速选择最优节点并添加为 peer
