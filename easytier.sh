@@ -211,6 +211,16 @@ create_service_file() {
         chmod 644 "$LOG_FILE"
     fi
 
+    # 读取 web_server 配置（用于连接 Web 控制台）
+    local web_server_config=""
+    if [ -f "$CONFIG_FILE" ]; then
+        web_server_config=$(grep "^web_server\s*=" "$CONFIG_FILE" 2>/dev/null | sed 's/^web_server\s*=\s*"\([^"]*\)"/\1/')
+    fi
+    local web_server_arg=""
+    if [ -n "$web_server_config" ]; then
+        web_server_arg="-w ${web_server_config}"
+    fi
+
     if [[ "$OS_TYPE" == "linux" ]]; then
         cat > "${SERVICE_FILE}" << EOL
 [Unit]
@@ -220,7 +230,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=${INSTALL_DIR}/${CORE_BINARY_NAME} -c ${CONFIG_FILE}
+ExecStart=${INSTALL_DIR}/${CORE_BINARY_NAME} -c ${CONFIG_FILE} ${web_server_arg}
 # 使用 "always" 策略确保进程无论如何退出都会被重启，提供最强的守护
 Restart=always
 RestartSec=5s
@@ -235,7 +245,7 @@ EOL
 description="EasyTier Service with Supervisor"
 supervisor=supervise-daemon
 command="${INSTALL_DIR}/${CORE_BINARY_NAME}"
-command_args="-c ${CONFIG_FILE}"
+command_args="-c ${CONFIG_FILE} ${web_server_arg}"
 command_user="root"
 pidfile="/var/run/${SERVICE_NAME}.pid"
 output_log="${LOG_FILE}"
@@ -247,6 +257,10 @@ depend() {
 EOL
         chmod +x "${SERVICE_FILE}";
     elif [[ "$OS_TYPE" == "macos" ]]; then
+        local web_server_xml=""
+        if [ -n "$web_server_config" ]; then
+            web_server_xml="<string>-w</string>\n        <string>${web_server_config}</string>"
+        fi
         cat > "${SERVICE_FILE}" << EOL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -259,6 +273,7 @@ EOL
         <string>${INSTALL_DIR}/${CORE_BINARY_NAME}</string>
         <string>-c</string>
         <string>${CONFIG_FILE}</string>
+        ${web_server_xml}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -501,6 +516,8 @@ disable_udp_hole_punching = false
 enableKcp_Proxy = true
 # 新增：默认开启私有模式（仅允许相同network_name/network_secret的节点连接）
 private_mode = true
+# 连接 Web 控制台配置（通过高级配置菜单设置，格式: udp://127.0.0.1:22020/admin）
+# web_server = ""
 EOF
 	if [ $? -eq 0 ]; then echo "已成功创建默认配置文件: ${CONFIG_FILE}"; return 0;
 	else echo -e "${RED}错误: 创建配置文件失败!${NC}"; return 1; fi; }
@@ -604,38 +621,39 @@ advanced_config_menu() {
 		echo "  9. 设置外部发现节点 (external_node)"
 		echo " 10. 设置默认协议 (default_protocol)"
 		echo " 11. 设置 RPC 管理端口 (rpc_portal)"
+		echo " 12. 连接 Web 控制台 (web_server)"
 		echo ""
 		echo " --- 高级功能 ---"
-		echo " 12. 出口节点 (exit node) 配置"
-		echo " 13. 子网代理 (subnet proxy)"
-		echo " 14. VPN Portal (WireGuard)"
-		echo " 15. SOCKS5 代理服务器"
-		echo " 16. 手动路由 (manual_routes)"
+		echo " 13. 出口节点 (exit node) 配置"
+		echo " 14. 子网代理 (subnet proxy)"
+		echo " 15. VPN Portal (WireGuard)"
+		echo " 16. SOCKS5 代理服务器"
+		echo " 17. 手动路由 (manual_routes)"
 		echo ""
 		echo " --- 性能与协议 ---"
-		echo " 17. 设置 MTU"
-		echo " 18. 延迟优先模式 (latency_first)"
-		echo " 19. 多线程模式 (multi_thread)"
+		echo " 18. 设置 MTU"
+		echo " 19. 延迟优先模式 (latency_first)"
+		echo " 20. 多线程模式 (multi_thread)"
 		echo ""
 		echo " --- 开关选项 ---"
-		echo " 20. 加密开关 (enable_encryption)"
-		echo " 21. IPv6 开关 (enable_ipv6)"
-		echo " 22. P2P 开关 (disable_p2p)"
-		echo " 23. UDP 打洞开关 (disable_udp_hole_punching)"
-		echo " 24. TUN 设备开关 (no_tun)"
-		echo " 25. Smoltcp 栈开关 (use_smoltcp)"
-		echo " 26. KCP 代理开关 (enableKcp_Proxy)"
-		echo " 27. 中继所有 RPC (relay_all_peer_rpc)"
-		echo " 28. 私有模式 (private_mode)"
+		echo " 21. 加密开关 (enable_encryption)"
+		echo " 22. IPv6 开关 (enable_ipv6)"
+		echo " 23. P2P 开关 (disable_p2p)"
+		echo " 24. UDP 打洞开关 (disable_udp_hole_punching)"
+		echo " 25. TUN 设备开关 (no_tun)"
+		echo " 26. Smoltcp 栈开关 (use_smoltcp)"
+		echo " 27. KCP 代理开关 (enableKcp_Proxy)"
+		echo " 28. 中继所有 RPC (relay_all_peer_rpc)"
+		echo " 29. 私有模式 (private_mode)"
 		echo ""
 		echo " --- 其他 ---"
-		echo " 29. 日志配置"
-		echo " 30. 路由白名单 (foreign_network_whitelist)"
+		echo " 30. 日志配置"
+		echo " 31. 路由白名单 (foreign_network_whitelist)"
 		echo ""
 		echo " ---"
 		echo "  0. 返回主菜单"
 		echo "======================================================="
-		read -p "请输入选项 [0-30]: " sub
+		read -p "请输入选项 [0-31]: " sub
 
 		case $sub in
 		1) read -p "新的网络名称: " val; set_toml_value "network_name" "\"$val\"" "$CONFIG_FILE" ;;
@@ -662,7 +680,14 @@ advanced_config_menu() {
 		    grep "^rpc_portal" "$CONFIG_FILE" 2>/dev/null || echo "(未设置，默认 ${DEFAULT_RPC_PORTAL})"
 		    read -p "新的 RPC Portal (如 127.0.0.1:15888，0 为随机端口): " val
 		    if [ -n "$val" ]; then add_toml_entry "rpc_portal" "\"$val\"" "$CONFIG_FILE"; fi ;;
-		12) echo "出口节点配置:"
+		12) echo "连接 Web 控制台:"
+		    echo "当前 web_server: $(grep "^web_server" "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
+		    echo "格式: <protocol>://<host>:<port>/<username>"
+		    echo "示例: udp://127.0.0.1:22020/admin"
+		    read -p "Web 控制台地址 (留空则删除): " val
+		    if [ -n "$val" ]; then add_toml_entry "web_server" "\"$val\"" "$CONFIG_FILE";
+		    else sed -i.bak "/^web_server\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已删除 Web 控制台连接配置。${NC}"; fi ;;
+		13) echo "出口节点配置:"
 		    echo "  enable_exit_node = $(grep 'enable_exit_node' "$CONFIG_FILE" 2>/dev/null || echo 'false')"
 		    echo "  exit_nodes = $(grep 'exit_nodes' "$CONFIG_FILE" 2>/dev/null || echo '(空)')"
 		    read -p "操作: [1]启用本节点为出口 [2]禁用出口 [3]设置出口节点列表 [0]返回: " eact
@@ -671,46 +696,46 @@ advanced_config_menu() {
 		        2) set_toml_value "enable_exit_node" "false" "$CONFIG_FILE" ;;
 		        3) read -p "出口节点虚拟IP列表 (逗号分隔, 如 10.0.0.1,10.0.0.2): " val; add_exit_nodes "$val" "$CONFIG_FILE" ;;
 		    esac ;;
-		13) echo "子网代理:";
+		14) echo "子网代理:";
 		    grep -A1 "\[\[proxy_network\]\]" "$CONFIG_FILE" 2>/dev/null | grep cidr || echo "(无)"
 		    read -p "[a]添加子网 [d]清空所有 [c]取消: " pact
 		    if [ "$pact" = "a" ]; then read -p "CIDR (如 192.168.1.0/24): " val; add_proxy_network "$val" "$CONFIG_FILE";
 		    elif [ "$pact" = "d" ]; then sed -i.bak "/\[\[proxy_network\]\]/d;/cidr\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已清空所有子网代理。${NC}"; fi ;;
-		14) echo "VPN Portal (WireGuard 门户):"
+		15) echo "VPN Portal (WireGuard 门户):"
 		    grep "^vpn_portal" "$CONFIG_FILE" 2>/dev/null || echo "(未设置)"
 		    read -p "VPN Portal 配置 (如 wg://0.0.0.0:11013/10.14.14.0/24，留空则删除): " val
 		    if [ -n "$val" ]; then add_vpn_portal "$val" "$CONFIG_FILE";
 		    else sed -i.bak "/^vpn_portal\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已删除 VPN Portal 配置。${NC}"; fi ;;
-		15) echo "SOCKS5 代理:"
+		16) echo "SOCKS5 代理:"
 		    grep "^socks5" "$CONFIG_FILE" 2>/dev/null || echo "(未设置)"
 		    read -p "SOCKS5 端口 (如 1080，留空则删除): " val
 		    if [ -n "$val" ]; then add_toml_entry "socks5" "\"$val\"" "$CONFIG_FILE";
 		    else sed -i.bak "/^socks5\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已删除 SOCKS5 配置。${NC}"; fi ;;
-		16) echo "手动路由:"
+		17) echo "手动路由:"
 		    grep "^manual_routes" "$CONFIG_FILE" 2>/dev/null || echo "(未设置，使用自动路由)"
 		    read -p "手动路由 CIDR 列表 (逗号分隔, 如 10.1.0.0/16,10.2.0.0/16，留空则清空): " val
 		    if [ -n "$val" ]; then add_manual_routes "$val" "$CONFIG_FILE";
 		    else sed -i.bak "/^manual_routes\s*=/d" "$CONFIG_FILE" && rm "${CONFIG_FILE}.bak"; echo -e "${YELLOW}已清空手动路由。${NC}"; fi ;;
-		17) read -p "MTU 值 (加密默认1400，未加密默认1420): " val; set_toml_value "mtu" "$val" "$CONFIG_FILE" ;;
-		18) read -p "延迟优先模式 (true/false): " val; set_toml_value "latency_first" "$val" "$CONFIG_FILE" ;;
-		19) read -p "多线程模式 (true/false): " val; add_toml_entry "multi_thread" "$val" "$CONFIG_FILE" ;;
-		20) read -p "启用加密 (true/false): " val; set_toml_value "enable_encryption" "$val" "$CONFIG_FILE" ;;
-		21) read -p "启用 IPv6 (true/false): " val; set_toml_value "enable_ipv6" "$val" "$CONFIG_FILE" ;;
-		22) read -p "禁用 P2P (true/false): " val; set_toml_value "disable_p2p" "$val" "$CONFIG_FILE" ;;
-		23) read -p "禁用 UDP 打洞 (true/false): " val; set_toml_value "disable_udp_hole_punching" "$val" "$CONFIG_FILE" ;;
-		24) read -p "不创建 TUN 设备 (true/false): " val; set_toml_value "no_tun" "$val" "$CONFIG_FILE" ;;
-		25) read -p "启用 smoltcp 用户态栈 (true/false): " val; set_toml_value "use_smoltcp" "$val" "$CONFIG_FILE" ;;
-		26) read -p "启用 KCP 代理 (true/false): " val; set_toml_value "enableKcp_Proxy" "$val" "$CONFIG_FILE" ;;
-		27) read -p "中继所有 Peer RPC (true/false): " val; set_toml_value "relay_all_peer_rpc" "$val" "$CONFIG_FILE" ;;
-		28) read -p "私有模式 (true/false): " val; set_toml_value "private_mode" "$val" "$CONFIG_FILE" ;;
-		29) echo "日志配置:"
+		18) read -p "MTU 值 (加密默认1400，未加密默认1420): " val; set_toml_value "mtu" "$val" "$CONFIG_FILE" ;;
+		19) read -p "延迟优先模式 (true/false): " val; set_toml_value "latency_first" "$val" "$CONFIG_FILE" ;;
+		20) read -p "多线程模式 (true/false): " val; add_toml_entry "multi_thread" "$val" "$CONFIG_FILE" ;;
+		21) read -p "启用加密 (true/false): " val; set_toml_value "enable_encryption" "$val" "$CONFIG_FILE" ;;
+		22) read -p "启用 IPv6 (true/false): " val; set_toml_value "enable_ipv6" "$val" "$CONFIG_FILE" ;;
+		23) read -p "禁用 P2P (true/false): " val; set_toml_value "disable_p2p" "$val" "$CONFIG_FILE" ;;
+		24) read -p "禁用 UDP 打洞 (true/false): " val; set_toml_value "disable_udp_hole_punching" "$val" "$CONFIG_FILE" ;;
+		25) read -p "不创建 TUN 设备 (true/false): " val; set_toml_value "no_tun" "$val" "$CONFIG_FILE" ;;
+		26) read -p "启用 smoltcp 用户态栈 (true/false): " val; set_toml_value "use_smoltcp" "$val" "$CONFIG_FILE" ;;
+		27) read -p "启用 KCP 代理 (true/false): " val; set_toml_value "enableKcp_Proxy" "$val" "$CONFIG_FILE" ;;
+		28) read -p "中继所有 Peer RPC (true/false): " val; set_toml_value "relay_all_peer_rpc" "$val" "$CONFIG_FILE" ;;
+		29) read -p "私有模式 (true/false): " val; set_toml_value "private_mode" "$val" "$CONFIG_FILE" ;;
+		30) echo "日志配置:"
 		    echo "  console_log_level = $(grep 'console_log_level' "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
 		    echo "  file_log_level = $(grep 'file_log_level' "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
 		    echo "  file_log_dir = $(grep 'file_log_dir' "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
 		    read -p "控制台日志级别 (trace/debug/info/warn/error): " val; [ -n "$val" ] && add_toml_entry "console_log_level" "\"$val\"" "$CONFIG_FILE"
 		    read -p "文件日志级别 (trace/debug/info/warn/error): " val; [ -n "$val" ] && add_toml_entry "file_log_level" "\"$val\"" "$CONFIG_FILE"
 		    read -p "日志目录路径: " val; [ -n "$val" ] && add_toml_entry "file_log_dir" "\"$val\"" "$CONFIG_FILE" ;;
-		30) echo "当前白名单: $(grep 'foreign_network_whitelist' "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
+		31) echo "当前白名单: $(grep 'foreign_network_whitelist' "$CONFIG_FILE" 2>/dev/null || echo '(未设置)')"
 		    read -p "路由白名单 (* 表示全部，空则禁用转发): " val
 		    if [ -n "$val" ]; then set_toml_value "foreign_network_whitelist" "\"$val\"" "$CONFIG_FILE"; fi ;;
 		0) break ;;
