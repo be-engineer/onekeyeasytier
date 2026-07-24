@@ -595,9 +595,12 @@ test_node_latency() {
 	if timeout "$NODE_PING_TIMEOUT" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
 		end=$(date +%s%N 2>/dev/null || date +%s)
 		# 计算延迟（毫秒）
-		if echo "$start" | grep -q "N"; then
+		# 检查是否为纳秒时间戳（长度大于10位）
+		if [ "${#start}" -gt 10 ]; then
+			# 纳秒时间戳：除以1000000得到毫秒
 			latency=$(( (end - start) / 1000000 ))
 		else
+			# 秒时间戳：乘以1000得到毫秒
 			latency=$(( (end - start) * 1000 ))
 		fi
 		echo "$latency"
@@ -1534,12 +1537,12 @@ public_nodes_menu() {
 				echo ""
 				echo "官方节点:"
 				for node in "${BUILTIN_PUBLIC_NODES[@]}"; do
-					echo "  ${GREEN}✓${NC} $node"
+					echo "  [可用] $node"
 				done
 				echo ""
 				echo "社区节点:"
 				for node in "${BUILTIN_COMMUNITY_NODES[@]}"; do
-					echo "  ${GREEN}✓${NC} $node"
+					echo "  [可用] $node"
 				done
 				echo ""
 				echo -e "${YELLOW}提示: 还可以从官方 API 获取更多节点（选项2测速时自动获取）${NC}"
