@@ -175,11 +175,26 @@ add_toml_array() {
 # 追加 proxy_network 数组条目
 add_proxy_network() {
 	local cidr="$1" file="$2"
-	if ! grep -q "\[\[proxy_network\]\]" "$file" 2>/dev/null; then
-		echo -e "\n[[proxy_network]]" >> "$file"
-	fi
-	echo "cidr = \"${cidr}\"" >> "$file"
+	# 每个 proxy_network 都需要独立的 [[proxy_network]] section
+	echo -e "\n[[proxy_network]]\ncidr = \"${cidr}\"" >> "$file"
 	echo -e "${GREEN}已添加子网代理: ${cidr}${NC}"
+}
+
+# 开启 IP 转发（子网代理/出口节点必需）
+enable_ip_forward() {
+	if [[ "$OS_TYPE" == "linux" || "$OS_TYPE" == "alpine" ]]; then
+		# 临时开启
+		sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+		# 永久开启
+		if [ -d /etc/sysctl.d ]; then
+			echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-easytier-ip-forward.conf
+			sysctl -p /etc/sysctl.d/99-easytier-ip-forward.conf >/dev/null 2>&1
+		elif [ -f /etc/sysctl.conf ]; then
+			sed -i '/^#*net.ipv4.ip_forward/d' /etc/sysctl.conf
+			echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+			sysctl -p /etc/sysctl.conf >/dev/null 2>&1
+		fi
+	fi
 }
 
 # 追加 peer 数组条目
@@ -1601,10 +1616,13 @@ advanced_config_menu() {
 		    esac ;;
 		14) echo "子网代理:";
 		    grep -A1 "\[\[proxy_network\]\]" "$CONFIG_FILE" 2>/dev/null | grep cidr || echo "(无)"
+		    echo "提示: 子网代理需要开启 IP 转发才能生效"
 		    read -p "[a]添加子网 [d]清空所有 [c]取消: " pact
 		    if [ "$pact" = "a" ]; then 
 		        read -p "CIDR (如 192.168.1.0/24): " val; 
 		        add_proxy_network "$val" "$CONFIG_FILE";
+		        echo -e "${YELLOW}正在开启 IP 转发...${NC}";
+		        enable_ip_forward;
 		        echo -e "${YELLOW}正在重启服务以应用子网代理配置...${NC}";
 		        restart_service;
 		    elif [ "$pact" = "d" ]; then 
